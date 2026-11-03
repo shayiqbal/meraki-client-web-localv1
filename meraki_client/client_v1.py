@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import requests
+
 from meraki_client.client import MerakiVpnClient
 from meraki_client.exceptions import MerakiClientError
 
@@ -228,6 +230,62 @@ class MerakiVpnClientV1(MerakiVpnClient):
             "update appliance settings",
             network_id=network_id,
         )
+
+    # ── Network syslog servers ─────────────────────────────────────────────
+
+    def get_network_syslog_servers(self, network_id: str) -> dict[str, Any]:
+        """Return the configured network-wide syslog destinations.
+
+        This is a general network endpoint rather than an appliance endpoint,
+        although Dashboard may reject it for network types that do not support
+        syslog.  Callers deliberately receive that error so a bulk operation
+        can report the affected network without stopping other updates.
+        """
+        return self._syslog_request("GET", f"/networks/{network_id}/devices/syslog/servers")
+
+    def update_network_syslog_servers(
+        self,
+        network_id: str,
+        servers: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Replace a network's complete syslog server list."""
+        return self._syslog_request(
+            "PUT", f"/networks/{network_id}/devices/syslog/servers", {"servers": servers}
+        )
+
+    def get_organization_syslog_roles(self, organization_id: str) -> Any:
+        """Return the role values supported by each network in an organization."""
+        return self._syslog_request(
+            "GET", f"/organizations/{organization_id}/devices/syslog/servers/roles/byNetwork?perPage=1000"
+        )
+
+    def _syslog_request(
+        self, method: str, path: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Call the newer syslog API until the installed SDK exposes it.
+
+        The project pins Meraki SDK 2.x, whose generated client exposes only
+        the deprecated ``/syslogServers`` endpoint. This narrow direct call
+        keeps syslog on Meraki's supported ``/devices/syslog/servers`` API.
+        """
+        url = f"https://api.meraki.com/api/v1{path}"
+        headers = {
+            "Authorization": f"Bearer {self.settings.api_key}",
+            "X-Cisco-Meraki-API-Key": self.settings.api_key,
+            "Content-Type": "application/json",
+        }
+
+        def _do() -> dict[str, Any]:
+            response = requests.request(method, url, json=payload, headers=headers, timeout=30)
+            if response.status_code == 429:
+                raise MerakiClientError("Rate-limited by Meraki. Retrying…")
+            if not response.ok:
+                raise MerakiClientError(
+                    f"syslog request failed: HTTP {response.status_code} — {response.text[:200]}"
+                )
+            return response.json()
+
+        return self._call(_do, f"{method.lower()} syslog servers", path=path)
 
     # ── Group policies ─────────────────────────────────────────────────────────
 
